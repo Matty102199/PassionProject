@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Q‑Learning Tic‑Tac‑Toe</title>
+  <style>
+    :root{
+      --bg:#0b0f14; --panel:#121926; --muted:#6b7280; --text:#e5e7eb; --acc:#60a5fa; --win:#10b981; --loss:#ef4444;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell; background:linear-gradient(180deg,#0b0f14,#0f172a); color:var(--text); min-height:100vh; display:grid; place-items:center;}
+    .app{width:min(920px,94vw);}
+    header{display:flex; justify-content:space-between; align-items:center; gap:12px; margin:22px 0 14px}
+    h1{font-size:clamp(20px,3vw,28px); margin:0; letter-spacing:.25px}
+    .badge{font-size:12px; padding:6px 10px; border-radius:999px; background:#0ea5e9; color:white;}
+
+    .panel{background:var(--panel); border:1px solid #1f2a44; box-shadow:0 10px 30px rgba(0,0,0,.25); border-radius:18px; padding:16px;}
+
+    .controls{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px}
+    button, .select{cursor:pointer; border-radius:12px; border:1px solid #1f2a44; background:#0f172a; color:var(--text); padding:10px 14px; font-weight:600; transition:.15s ease;}
+    button:hover{transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.25)}
+    .primary{background:var(--acc); border-color:#4d86d6; color:#0b1220}
+    .danger{background:#1b0f12; border-color:#3b0d17; color:#fecaca}
+
+    .grid{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; width:min(520px,92vw); margin:18px auto 8px}
+    .cell{aspect-ratio:1/1; border-radius:16px; background:#0b1220; border:1px solid #1b2a44; display:grid; place-items:center; font-size:clamp(46px,10vw,72px); font-weight:800; user-select:none}
+    .cell:hover{outline:2px solid rgba(96,165,250,.25)}
+    .mark-x{color:#93c5fd}
+    .mark-o{color:#fca5a5}
+    .winflash{animation:blink .9s steps(2,end) 3}
+    @keyframes blink{50%{filter:brightness(1.8)}}
+
+    .status{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; font-size:14px; color:var(--muted)}
+    .status b{color:var(--text)}
+    progress{width:220px; height:12px; accent-color:var(--acc)}
+    .pill{padding:4px 10px; border-radius:999px; border:1px solid #22304f; background:#0b1220;}
+
+    footer{opacity:.7; font-size:12px; text-align:center; margin:14px 0 24px}
+    .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#0b1220; padding:3px 6px; border-radius:6px; border:1px solid #1b2a44}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Q‑Learning Tic‑Tac‑Toe <span class="badge">AI Learns by Playing</span></h1>
+    </header>
+
+    <div class="controls">
+  <button id="toggleSideBtn" type="button">Play as O (AI first)</button>
+  <button id="newGameBtn" type="button">New Game</button>
+  <button id="resetBrainBtn" class="danger" type="button">Reset AI Brain</button>
+  <button id="resetStatsBtn" class="danger" type="button">Reset Stats</button>
+  <span class="pill" id="aiStrength">AI: untrained</span>
+  <span class="pill" id="statsPill">Games: 0 • You 0-0-0 • Win%: 0%</span>
+</div>
+
+
+
+      <div class="grid" id="board"></div>
+
+      <div class="status">
+        <div id="statusText">Training a little so it isn’t clueless…</div>
+        <div>
+          <progress id="trainProgress" max="1" value="0"></progress>
+          <span id="trainMeter" class="pill">0%</span>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      Tip: Click a square to move. Press <span class="kbd">T</span> to train again, <span class="kbd">R</span> to reset.
+    </footer>
+  </div>
+
+  <script>
+
+function toggleSide(){
+  // flip the human’s mark
+  humanSide = (humanSide === X) ? O : X;
+
+  // update button label
+  const btn = document.getElementById('toggleSideBtn');
+  btn.textContent = (humanSide === X) ? 'Play as O (AI first)' : 'Play as X (You first)';
+
+  // update status + reset board (AI will move first if human is O)
+  setStatus(`You are ${humanSide}. ${humanSide === X ? 'Your move.' : 'AI starts.'}`);
+  resetGame();
+  updateStatsUI();
+}
+
+
+
+
+
+
+
+// ---------- Game utilities ----------
+const EMPTY = ' ';
+const X = 'X';
+const O = 'O';
+const WIN_LINES = [
+  [0,1,2],[3,4,5],[6,7,8],
+  [0,3,6],[1,4,7],[2,5,8],
+  [0,4,8],[2,4,6]
+];
+
+
+// let the browser paint during long loops
+const nextFrame = () => new Promise(r => requestAnimationFrame(r));
+
+// small shaping so wins are fast, losses avoided
+const STEP_PENALTY_TRAIN = -0.01;
+
+// --------- Minimax teacher (perfect play) ----------
+const mmMemo = new Map();
+function mmScore(state, player){           // negamax: score from 'player' to move
+  const key = state + '|' + player;
+  if (mmMemo.has(key)) return mmMemo.get(key);
+  const w = winnerOf(state);
+  const opp = (player===X? O: X);
+  if (w === player){ mmMemo.set(key,  1); return  1; }
+  if (w === opp)   { mmMemo.set(key, -1); return -1; }
+  if (!state.includes(EMPTY)){ mmMemo.set(key, 0); return 0; }
+
+  let best = -Infinity;
+  for (const a of legalMoves(state)){
+    const ns = state.slice(0,a) + player + state.slice(a+1);
+    const v = -mmScore(ns, opp);
+    if (v > best) best = v;
+    if (best === 1) break; // prune – can't beat a forced win
+  }
+  mmMemo.set(key, best);
+  return best;
+}
+function minimaxBestMove(state, player){
+  let bestA = null, bestV = -Infinity;
+  for (const a of legalMoves(state)){
+    const ns = state.slice(0,a) + player + state.slice(a+1);
+    const v = -mmScore(ns, (player===X? O: X));
+    if (v > bestV){ bestV = v; bestA = a; }
+  }
+  return bestA;
+}
+
+
+const winnerOf = (state) => {
+  for (const [a,b,c] of WIN_LINES){
+    if (state[a] !== EMPTY && state[a] === state[b] && state[a] === state[c]) return state[a];
+  }
+  return null;
+};
+const legalMoves = (state) => [...state].map((ch,i)=> ch===EMPTY? i:null).filter(i=>i!==null);
+const terminal   = (state) => winnerOf(state) !== null || !state.includes(EMPTY);
+const step = (state, action, player) => {
+  if (state[action] !== EMPTY) throw new Error('Illegal move');
+  const ns = state.slice(0,action) + player + state.slice(action+1);
+  const w = winnerOf(ns);
+  const done = (w !== null) || !ns.includes(EMPTY);
+  return { state: ns, winner: w, done };
+};
+
+// Let the browser paint during long training loops
+
+
+
+// ---------- Q-Learning Agent ----------
+class QAgent {
+  constructor(mark, {alpha=0.5, gamma=0.9, eps=0.2}={}){
+    this.mark = mark;
+    this.alpha = alpha; this.gamma = gamma; this.eps = eps;
+    this.Q = new Map(); // key: `${state}|${a}` -> value
+  }
+  key(s,a){ return s + '|' + a; }
+  q(s,a){ return this.Q.get(this.key(s,a)) ?? 0; }
+  setq(s,a,v){ this.Q.set(this.key(s,a), v); }
+
+  select(state){
+    const acts = legalMoves(state);
+    if (acts.length === 0) return null;
+    if (Math.random() < this.eps){
+      return acts[Math.floor(Math.random()*acts.length)];
+    }
+    let bestA = acts[0], bestV = this.q(state, acts[0]);
+    for (let i=1;i<acts.length;i++){
+      const a = acts[i], v = this.q(state,a);
+      if (v > bestV){ bestV = v; bestA = a; }
+    }
+    return bestA;
+  }
+
+  update(s,a,r,s2,done){
+    const key = this.key(s,a);
+    const cur = this.Q.get(key) ?? 0;
+    let target = r;
+    if (!done){
+      const acts2 = legalMoves(s2);
+      let maxNext = 0;
+      if (acts2.length){
+        maxNext = Math.max(...acts2.map(a2 => this.q(s2,a2)));
+      }
+      target = r + this.gamma * maxNext;
+    }
+    this.Q.set(key, cur + this.alpha * (target - cur));
+  }
+
+  size(){ return this.Q.size; }
+}
+
+// ---------- Self-play training ----------
+async function selfPlayTrain({
+  episodes=20000, alpha=0.5, gamma=0.9, epsStart=0.25, epsEnd=0.01, progressCb
+}){
+  const ax = new QAgent(X,{alpha,gamma,eps:epsStart});
+  const ao = new QAgent(O,{alpha,gamma,eps:epsStart});
+  const ease = t => (1-t)**2;
+
+  // outcome tallies
+  let xWins=0, oWins=0, draws=0;
+
+  for (let ep=1; ep<=episodes; ep++){
+    const t = ep/episodes;
+    ax.eps = ao.eps = epsEnd + (epsStart-epsEnd)*ease(t);
+
+    // ---- randomized starts to cover deeper states
+    let s = EMPTY.repeat(9);
+    let player = (Math.random()<0.5? X: O);
+    const preMoves = Math.floor(Math.random()*4);  // 0..3 random plies
+    for (let k=0;k<preMoves;k++){
+      const acts = legalMoves(s);
+      if (!acts.length) break;
+      const a = acts[Math.floor(Math.random()*acts.length)];
+      s = s.slice(0,a) + player + s.slice(a+1);
+      const w = winnerOf(s);
+      if (w || !s.includes(EMPTY)) break;
+      player = (player===X? O: X);
+    }
+
+    // ---- mix in a perfect opponent some episodes
+    const useMinimax  = Math.random() < 0.35;         // ~35% of episodes
+    const minimaxSide = (Math.random()<0.5? X: O);    // which side is perfect this episode
+    const last = {X:null, O:null};                    // {s,a,learn:boolean}
+
+    while (true){
+      const agent = (player===X? ax: ao);
+      const isMM  = useMinimax && (player===minimaxSide);
+      let a = isMM ? minimaxBestMove(s, player) : agent.select(s);
+      if (a===null) break;
+
+      const {state:s2, winner:w, done} = step(s,a,player);
+
+      if (!done){
+        if (!isMM) agent.update(s,a,STEP_PENALTY_TRAIN,s2,false);
+        last[player] = {s, a, learn: !isMM};
+        s = s2; player = (player===X? O: X);
+        continue;
+      }
+
+      // tally terminal
+      if (w===X) xWins++; else if (w===O) oWins++; else draws++;
+
+      // terminal updates (only for learning steps)
+      const rSelf = (w===player? 1 : w===null? 0 : -1);
+      if (!isMM) agent.update(s,a,rSelf,s2,true);
+
+      const opp = (player===X? O: X);
+      const lo = last[opp];
+      if (lo && lo.learn){
+        const rOther = (w===opp? 1 : w===null? 0 : -1);
+        const agOpp = (opp===X? ax: ao);
+        agOpp.update(lo.s, lo.a, rOther, s2, true);
+      }
+      break;
+    }
+
+    if (progressCb && (ep%500===0 || ep===episodes)){
+      if (ep % 2000 === 0) await nextFrame();
+      progressCb(ep/episodes, {
+        ep, axSize:ax.size(), aoSize:ao.size(),
+        xWins, oWins, draws
+      });
+    }
+  }
+  ax.eps = 0; ao.eps = 0;
+  return {ax, ao, xWins, oWins, draws};
+}
+
+
+// ---------- UI wiring ----------
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('statusText');
+const progressEl = document.getElementById('trainProgress');
+const meterEl = document.getElementById('trainMeter');
+const aiStrengthEl = document.getElementById('aiStrength');
+const toggleSideBtn = document.getElementById('toggleSideBtn');
+const newGameBtn = document.getElementById('newGameBtn');
+const trainBtn = document.getElementById('trainBtn');         // may be null if button removed
+const resetBrainBtn = document.getElementById('resetBrainBtn');
+const resetStatsBtn = document.getElementById('resetStatsBtn');
+
+let trainedX=null, trainedO=null;
+let humanSide = X;
+let state = EMPTY.repeat(9);
+let turn = X;
+let over = false;
+
+// stats + per-game history
+let humanWins = 0, aiWins = 0, draws = 0;
+let history = [];
+
+function updateStatsUI(){
+  const games = humanWins + aiWins + draws;
+  const denom = Math.max(1, humanWins + aiWins);
+  const winPct = Math.round((humanWins/denom)*100);
+  document.getElementById('statsPill').textContent =
+    `Games: ${games} • You ${humanWins}-${draws}-${aiWins} • Win%: ${winPct}%`;
+}
+
+// Build cells
+const cells = [];
+for (let i=0;i<9;i++){
+  const d = document.createElement('div');
+  d.className='cell';
+  d.dataset.idx=i;
+  d.addEventListener('click', ()=> onCellClick(i));
+  boardEl.appendChild(d); cells.push(d);
+}
+
+function render(){
+  cells.forEach((d,i)=>{
+    const ch = state[i];
+    d.textContent = ch===EMPTY? '' : ch;
+    d.classList.toggle('mark-x', ch==='X');
+    d.classList.toggle('mark-o', ch==='O');
+    d.classList.remove('winflash');
+  });
+  const w = winnerOf(state);
+  if (w){
+    for (const L of WIN_LINES){
+      const [a,b,c] = L; if (state[a]!==EMPTY && state[a]===state[b] && state[a]===state[c]){
+        [a,b,c].forEach(i=> cells[i].classList.add('winflash'));
+        break;
+      }
+    }
+  }
+}
+
+function setStatus(txt){ statusEl.textContent = txt; }
+function setProgress(f){ progressEl.value = f; meterEl.textContent = Math.round(f*100)+'%'; }
+
+function resetGame(){
+  console.log('[resetGame] fired');
+  // Reset state
+  state = EMPTY.repeat(9);
+  turn = X;
+  over = false;
+  history = [];
+
+  // Hard-clear the board DOM (even if render is skipped)
+  for (const c of cells){
+    c.textContent = '';
+    c.classList.remove('mark-x','mark-o','winflash');
+  }
+
+
+  // Render and status
+  render();
+  setStatus(`New game. You are ${humanSide}. ${humanSide===X? 'Your move.' : 'AI starts.'}`);
+
+  // If AI goes first, move immediately
+  if (humanSide===O) setTimeout(aiMoveIfNeeded, 0);
+}
+
+
+function aiFor(mark){ return mark===X? trainedX : trainedO; }
+
+function onCellClick(idx){
+  if (over) return;
+  if (!trainedX) ensureAgents();              // create agents on-demand
+  if (turn !== humanSide) return;
+  if (state[idx] !== EMPTY) return;
+
+  const prev = state;
+  const r = step(state, idx, turn);
+  state = r.state; render();
+  history.push({s: prev, a: idx, p: turn, s2: state, done: r.done});
+
+  if (r.done){ finalize(r.winner); return; }
+  turn = (turn===X? O: X);
+  setTimeout(aiMoveIfNeeded, 160);
+}
+
+
+
+function aiMoveIfNeeded(){
+  if (over) return;
+  if (!trainedX) ensureAgents();              // create agents on-demand
+  if (turn === humanSide) return;
+
+  const agent = aiFor(turn); agent.eps = 0;   // greedy during human games
+  const a = agent.select(state);
+  if (a===null) return;
+
+  const prev = state;
+  const r = step(state, a, turn);
+  state = r.state; render();
+  history.push({s: prev, a, p: turn, s2: state, done: r.done});
+
+  if (r.done){ finalize(r.winner); return; }
+  turn = (turn===X? O: X);
+}
+
+
+
+function finalize(w){
+  over = true;
+
+  if (w===null){ draws++; setStatus('Draw! Click New Game to play again.'); }
+  else if (w===humanSide){ humanWins++; setStatus('You win! 🎉 Click New Game to play again.'); }
+  else { aiWins++; setStatus('AI wins! Click New Game to try again.'); }
+
+  try { humanGameLearn(history, w); } catch(e){ console.warn('learn error', e); }
+  history = [];
+  updateStatsUI();
+  disableControls(false);
+}
+
+// Training by button (optional if you keep the button)
+async function train(episodes){
+  disableControls(true);
+  setStatus(`Training ${episodes.toLocaleString()} self-play games…`);
+  setProgress(0);
+
+  const {ax, ao, xWins, oWins, draws} = await selfPlayTrain({
+    episodes,
+    progressCb: (f, info) => {
+      setProgress(f);
+      aiStrengthEl.textContent =
+        `AI brain: ${info.axSize + info.aoSize} Q-values`;
+      // live W/D/L in the status line
+      setStatus(
+        `Training ${info.ep.toLocaleString()}/${episodes.toLocaleString()}… ` +
+        `X ${info.xWins.toLocaleString()} • O ${info.oWins.toLocaleString()} • ` +
+        `Draws ${info.draws.toLocaleString()}`
+      );
+    }
+  });
+
+  trainedX = ax; trainedO = ao;
+  aiStrengthEl.textContent = `AI brain: ${trainedX.size()+trainedO.size()} Q-values`;
+  saveBrain();
+
+  setProgress(1);
+  setStatus(
+    `Training complete. X ${xWins.toLocaleString()} • O ${oWins.toLocaleString()} • `
+    + `Draws ${draws.toLocaleString()}. Let’s play!`
+  );
+  disableControls(false);
+  resetGame();
+}
+
+
+function disableControls(dis){
+  [toggleSideBtn, newGameBtn, trainBtn, resetBrainBtn, resetStatsBtn]
+    .forEach(b => { if (b) b.disabled = dis; });
+}
+
+
+
+function resetBrain(){ 
+  trainedX = trainedO = null; 
+  localStorage.removeItem('qbrain'); 
+  aiStrengthEl.textContent = 'AI: untrained'; 
+  setStatus('AI brain cleared. Train to play.');
+}
+
+// --- Human-training learning, symmetry, persistence ---
+// (SINGLE COPY — do not duplicate)
+const ALPHA_HUMAN = 0.8;     // faster learning from human games
+const STEP_PENALTY = -0.01;  // tiny cost each move
+
+function ensureAgents(){
+  if (!trainedX) trainedX = new QAgent(X,{alpha:ALPHA_HUMAN, gamma:0.9, eps:0});
+  if (!trainedO) trainedO = new QAgent(O,{alpha:ALPHA_HUMAN, gamma:0.9, eps:0});
+  trainedX.alpha = ALPHA_HUMAN; trainedO.alpha = ALPHA_HUMAN;
+}
+
+const TFMS = [
+  [0,1,2,3,4,5,6,7,8],                // identity
+  [6,3,0,7,4,1,8,5,2],                // rot90
+  [8,7,6,5,4,3,2,1,0],                // rot180
+  [2,5,8,1,4,7,0,3,6],                // rot270
+  [2,1,0,5,4,3,8,7,6],                // flipH
+  [6,7,8,3,4,5,0,1,2],                // flipV
+  [0,3,6,1,4,7,2,5,8],                // flipDiag (main)
+  [8,5,2,7,4,1,6,3,0]                 // flipAntiDiag
+];
+
+function applyMap(state, action, map){
+  const sArr = [...state];
+  const t = map.map(i => sArr[i]).join('');
+  const a2 = map[action];
+  return {state:t, action:a2};
+}
+
+function humanGameLearn(hist, winner){
+  ensureAgents();
+  for (const map of TFMS){
+    for (let i=0; i<hist.length; i++){
+      const entry = hist[i];
+      const {state:sT, action:aT} = applyMap(entry.s, entry.a, map);
+      const s2T = applyMap(entry.s2, entry.a, map).state;
+      const agent = entry.p===X ? trainedX : trainedO;
+      if (i < hist.length-1){
+        agent.update(sT, aT, STEP_PENALTY, s2T, false);
+      } else {
+        let r = 0; if (winner===entry.p) r = 1; else if (winner===null) r = 0; else r = -1;
+        agent.update(sT, aT, r, s2T, true);
+      }
+    }
+  }
+  aiStrengthEl.textContent = `AI brain: ${trainedX.size()+trainedO.size()} Q-values`;
+  saveBrain();
+}
+
+function serializeAgent(agent){
+  const arr = [];
+  agent.Q.forEach((v,k)=>{ const [s,a] = k.split('|'); arr.push([s,Number(a),v]); });
+  return {mark:agent.mark, alpha:agent.alpha, gamma:agent.gamma, eps:0, data:arr};
+}
+function deserializeAgent(obj){
+  const ag = new QAgent(obj.mark,{alpha:obj.alpha, gamma:obj.gamma, eps:0});
+  for (const [s,a,v] of obj.data){ ag.setq(s,a,v); }
+  return ag;
+}
+function saveBrain(){
+  try{
+    const payload = {
+      X: trainedX? serializeAgent(trainedX): null,
+      O: trainedO? serializeAgent(trainedO): null,
+      stats: {humanWins, aiWins, draws}
+    };
+    localStorage.setItem('qbrain', JSON.stringify(payload));
+  }catch(e){ console.warn('saveBrain failed', e); }
+}
+function loadBrain(){
+  try{
+    const raw = localStorage.getItem('qbrain');
+    if (!raw) return false;
+    const obj = JSON.parse(raw);
+    if (obj.X) trainedX = deserializeAgent(obj.X);
+    if (obj.O) trainedO = deserializeAgent(obj.O);
+    if (obj.stats){ ({humanWins, aiWins, draws} = obj.stats); updateStatsUI(); }
+    aiStrengthEl.textContent = `AI brain: ${(trainedX?.size()||0)+(trainedO?.size()||0)} Q-values`;
+    return true;
+  }catch(e){ console.warn('loadBrain failed', e); return false; }
+}
+
+// Central, delegated button routing (works even after any DOM changes)
+const handlers = {
+  toggleSideBtn: () => toggleSide(),
+  newGameBtn:    () => resetGame(),
+  resetBrainBtn: () => resetBrain(),
+  resetStatsBtn: () => {
+    humanWins = 0; aiWins = 0; draws = 0;
+    updateStatsUI(); saveBrain();
+    setStatus('Stats reset.');
+  },
+  // If you ever add a Train button back:
+  // trainBtn:      () => train(20000)
+};
+
+document.addEventListener('click', (e)=>{
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const fn = handlers[btn.id];
+  if (!fn) return;
+  e.preventDefault();
+  fn();
+});
+
+// Keyboard shortcuts
+window.addEventListener('keydown', (e)=>{
+  if (e.key === 'r' || e.key === 'R') handlers.newGameBtn();
+  if (e.key === 't' || e.key === 'T') handlers.trainBtn && handlers.trainBtn();
+});
+
+
+
+
+/* (async()=>{
+  render();
+  updateStatsUI();
+  const loaded = loadBrain();
+
+  if (!loaded){
+    // Either quick warm-up OR just start with empty agents for human training:
+    // Option A (quick self-play so it's not clueless):
+    // await train(12000);
+
+    // Option B (pure human training from move 1):
+    ensureAgents();
+    aiStrengthEl.textContent = `AI brain: ${trainedX.size()+trainedO.size()} Q-values`;
+    setStatus("Untrained brain ready. Your moves will teach it!");
+  } else {
+    setStatus("Loaded saved brain. Let's play!");
+  }
+  resetGame();
+})(); */
+
+(async ()=>{
+  render();
+  updateStatsUI();
+
+  const params = new URLSearchParams(location.search);
+  const forceRetrain = params.get('retrain') === '1';
+
+  let loaded = false;
+  if (!forceRetrain) loaded = loadBrain();
+
+  if (!loaded || forceRetrain){
+    await train(10000000);                 // shows status + progress bar
+  } else {
+    setStatus("Loaded saved brain. Let's play!");
+  }
+  resetGame();
+})();
+
+</script>
