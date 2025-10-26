@@ -1,0 +1,98 @@
+import random
+from collections import defaultdict
+
+EMPTY, X, O = " ", "X", "O"
+ACTIONS = list(range(9))
+
+def lines(): return [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
+def winner(b):
+    for a,b2,c in lines():
+        if b[a] != EMPTY and b[a] == b[b2] == b[c]: return b[a]
+    return None
+def terminal(b): return winner(b) is not None or EMPTY not in b
+def legal(b): return [i for i in range(9) if b[i]==EMPTY]
+def as_state(b): return "".join(b)
+
+def step(board, move, player):
+    b = board[:]
+    b[move] = player
+    r = 0
+    if winner(b) == player: r = 1
+    elif terminal(b): r = 0
+    else: r = 0
+    return b, r
+
+class QAgent:
+    def __init__(self, mark, alpha=0.5, gamma=0.9, eps=0.1):
+        self.mark = mark
+        self.Q = defaultdict(float)
+        self.alpha, self.gamma, self.eps = alpha, gamma, eps
+
+    def select(self, board):
+        acts = legal(board)
+        if random.random() < self.eps: return random.choice(acts)
+        s = as_state(board)+self.mark
+        vals = [(self.Q[(s,a)], a) for a in acts]
+        return max(vals)[1]
+
+    def update(self, s, a, r, s2, done):
+        if done:
+            target = r
+        else:
+            acts2 = [i for i in range(9) if s2[i]==EMPTY]
+            s2k = s2+self.mark
+            target = r + self.gamma * (max([self.Q[(s2k,a2)] for a2 in acts2]) if acts2 else 0)
+        key = (s+self.mark, a)
+        self.Q[key] += self.alpha * (target - self.Q[key])
+
+def play_game(ax, ao, train=True):
+    board = [EMPTY]*9
+    turn = X
+    history = []
+    while True:
+        agent = ax if turn==X else ao
+        s = as_state(board)
+        a = agent.select(board)
+        nb, r = step(board, a, turn)
+        board, turn2 = nb, (O if turn==X else X)
+        done = terminal(board)
+        # reward shaping: give -1 to the other agent if this agent just won
+        if done:
+            w = winner(board)
+            if w == X: rx, ro = 1, -1
+            elif w == O: rx, ro = -1, 1
+            else: rx, ro = 0, 0
+        if train:
+            # Update the agent who moved
+            agent.update(s, a, (1 if winner(board)==agent.mark else 0), as_state(board), done)
+        if done: 
+            return winner(board)
+
+def self_train(episodes=50000):
+    ax, ao = QAgent(X), QAgent(O)
+    for _ in range(episodes):
+        # epsilon decay over time (optional)
+        ax.eps = max(0.01, ax.eps*0.99995)
+        ao.eps = max(0.01, ao.eps*0.99995)
+        play_game(ax, ao, train=True)
+    return ax, ao
+
+if __name__ == "__main__":
+    ax, ao = self_train(episodes=30000)
+    # Play human vs learned X
+    board = [EMPTY]*9
+    turn = X
+    def show(b):
+        print("\n".join([" | ".join(b[r:r+3]) for r in (0,3,6)]))
+        print("-"*5)
+    while not terminal(board):
+        show(board)
+        if turn == X:
+            mv = ax.select(board)
+        else:
+            mv = int(input("Your move (0-8): "))
+            if board[mv]!=EMPTY: print("Illegal"); continue
+        board[mv] = turn
+        turn = O if turn==X else X
+    show(board)
+    print("Winner:", winner(board) or "Draw")
